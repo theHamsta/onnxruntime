@@ -1073,14 +1073,16 @@ typedef struct OrtGraphicsInteropConfig {
    * works; streams use the default context.
    *
    * For D3D12: ID3D12CommandQueue*
-   * For Vulkan: VkQueue (cast to void*)
+   * For Vulkan: pass NULL
    */
   void* command_queue;
 
   /** \brief Additional API-specific options (optional).
    *
    * Can be used for future extensibility without changing the struct layout.
-   * For example, Vulkan-specific queue family index, or D3D12 fence sharing flags.
+   * For example, D3D12 fence sharing flags or provider-specific options like
+   * onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data
+   * for Vulkan interop for the NvTensorRTRTX provider.
    */
   const OrtKeyValuePairs* additional_options;
 } OrtGraphicsInteropConfig;

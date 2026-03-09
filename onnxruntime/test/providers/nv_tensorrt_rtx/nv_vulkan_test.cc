@@ -2,6 +2,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <memory>
 #include "core/session/onnxruntime_cxx_api.h"
 #include "core/graph/model.h"
 #if __has_include(<vulkan/vulkan.hpp>)
@@ -39,6 +40,10 @@
 #define CUDALIB "nvcuda.dll"
 #define DLOPENOPTIONS
 #endif
+
+// Small util for Go-like defer
+#define DEFER(resource, x) \
+  std::shared_ptr<void> resource##_finalizer(nullptr, [&](...) { x; })
 
 extern std::unique_ptr<Ort::Env> ort_env;
 
@@ -509,6 +514,7 @@ struct TestParameters {
   bool force_cig{};
   bool allow_cig{};
   bool use_dmabuf{};
+  bool use_init_graphics_interop_call{};
 };
 
 Ort::Session configure_session(const PathString& model_path, Ort::SyncStream& ort_stream, const Ort::ConstEpDevice& ep_device, size_t* aux_streams_array) {
@@ -638,22 +644,33 @@ void test_vulkan_interop(TestParameters& test_params) {
   // int dma_supported{false};
   // EXPECT_EQ(CUDA_SUCCESS, driver.cuDeviceGetAttribute_fn(&dma_supported, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, selected_device));
 
-  if (test_params.allow_cig) {
-    EXPECT_EQ(driver.IsLoaded(), true);
-    // At least on Windows we would like to test CiG
-    EXPECT_TRUE(cig_supported || !test_params.force_cig);
+  if (test_params.use_init_graphics_interop_call) {
+    Ort::KeyValuePairs kv;
+    kv.Add(onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data, std::to_string(reinterpret_cast<intptr_t>(external_compute_queue_data.data())).c_str());
+    OrtGraphicsInteropConfig interop_config{};
+    interop_config.version = ORT_API_VERSION;
+    interop_config.graphics_api = OrtGraphicsApi::ORT_GRAPHICS_API_VULKAN;
+    interop_config.additional_options = kv.GetConst();
+    EXPECT_TRUE(Ort::Status(interop_api.InitGraphicsInteropForEpDevice(ep_device, &interop_config)).IsOK());
+  } else {
+    if (test_params.allow_cig) {
+      EXPECT_EQ(driver.IsLoaded(), true);
+      // At least on Windows we would like to test CiG
+      EXPECT_TRUE(cig_supported || !test_params.force_cig);
 
-    if (cig_supported) {
-      CUcontext ctx{};
-      CUctxCigParam cig_params{};
-      cig_params.sharedDataType = CIG_DATA_TYPE_NV_BLOB;
-      cig_params.sharedData = external_compute_queue_data.data();
-      CUctxCreateParams params{};
-      params.cigParams = &cig_params;
-      EXPECT_EQ(CUDA_SUCCESS, driver.cuCtxCreate_v4_fn(&ctx, &params, 0, selected_device));
-      EXPECT_EQ(CUDA_SUCCESS, driver.cuCtxSetCurrent_fn(ctx));
+      if (cig_supported) {
+        CUcontext ctx{};
+        CUctxCigParam cig_params{};
+        cig_params.sharedDataType = CIG_DATA_TYPE_NV_BLOB;
+        cig_params.sharedData = external_compute_queue_data.data();
+        CUctxCreateParams params{};
+        params.cigParams = &cig_params;
+        EXPECT_EQ(CUDA_SUCCESS, driver.cuCtxCreate_v4_fn(&ctx, &params, 0, selected_device));
+        EXPECT_EQ(CUDA_SUCCESS, driver.cuCtxSetCurrent_fn(ctx));
+      }
     }
   }
+  DEFER(ep_device, if (test_params.use_init_graphics_interop_call) { EXPECT_TRUE(Ort::Status(interop_api.DeinitGraphicsInteropForEpDevice(ep_device)).IsOK()); });
 
   ExportableTimelineSemaphore input_ready{};
   create_timeline_semaphore(resources, input_ready);
@@ -828,6 +845,12 @@ void test_vulkan_interop(TestParameters& test_params) {
 TEST(NvExecutionProviderVulkanTest, VkCigDisabled) {
   TestParameters params;
   params.allow_cig = false;
+  test_vulkan_interop(params);
+}
+
+TEST(NvExecutionProviderVulkanTest, VkInitGraphicsInterop) {
+  TestParameters params;
+  params.use_init_graphics_interop_call = true;
   test_vulkan_interop(params);
 }
 

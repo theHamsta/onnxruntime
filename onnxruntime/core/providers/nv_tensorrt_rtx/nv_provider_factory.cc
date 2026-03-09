@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
+#include <cuda.h>
 
 #include "core/providers/shared_library/provider_api.h"
 #include "core/session/onnxruntime_c_api.h"
@@ -1556,9 +1557,40 @@ struct NvTensorRtRtxEpFactory : OrtEpFactory {
                                        "[NvTensorRTRTX EP] D3D12 CIG context creation not supported on this platform");
 #endif
     } else if (config->graphics_api == ORT_GRAPHICS_API_VULKAN) {
-      // TODO: Add Vulkan CIG context support if needed
-      return onnxruntime::CreateStatus(ORT_NOT_IMPLEMENTED,
-                                       "[NvTensorRTRTX EP] Vulkan CIG context not yet implemented");
+      int cig_supported{false};
+      if (cudaSuccess != cudaDeviceGetAttribute(&cig_supported, cudaDevAttrVulkanCigSupported, device_id)) {
+        return onnxruntime::CreateStatus(ORT_EP_FAIL,
+                                         "[NvTensorRTRTX EP] Could not determine CiG support for CUDA device");
+      }
+      if (!cig_supported) {
+        LOGS_DEFAULT(INFO) << "[NvTensorRTRTX EP] InitGraphicsInterop: CiG for Vulkan is not supported on the given device. Will use the default CUDA context";
+        return nullptr;
+      }
+      const char* nv_blob_ptr_str = factory.ort_api.GetKeyValue(config->additional_options, onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data);
+      if (!nv_blob_ptr_str) {
+        LOGS_DEFAULT(WARNING) << "[NvTensorRTRTX EP] InitGraphicsInterop: Can't enable CUDA in Graphics (CiG) for Vulkan without onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data";
+        return nullptr;
+      }
+      uint64_t nv_blob_ptr = std::stoull(nv_blob_ptr_str);
+      if (nv_blob_ptr == 0) {
+        return onnxruntime::CreateStatus(ORT_EP_FAIL,
+                                         "[NvTensorRTRTX EP] Could not parse provided values for onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data or onnxruntime::nv::provider_option_names::kExternalComputeQueueDataParamNV_data_len");
+      }
+
+      CUctxCigParam cig_params{};
+      cig_params.sharedDataType = CIG_DATA_TYPE_NV_BLOB;
+      cig_params.sharedData = reinterpret_cast<void*>(nv_blob_ptr);
+      CUctxCreateParams params{};
+      params.cigParams = &cig_params;
+
+      cu_result = cuCtxCreate_v4(&cig_context, &params, 0, device_id);
+      if (cu_result != CUDA_SUCCESS) {
+        const char* error_str = nullptr;
+        cuGetErrorString(cu_result, &error_str);
+        std::string error_msg = "[NvTensorRTRTX EP] Failed to create CIG context for D3D12: ";
+        error_msg += error_str ? error_str : "unknown error";
+        return onnxruntime::CreateStatus(ORT_FAIL, error_msg.c_str());
+      }
     } else {
       return onnxruntime::CreateStatus(ORT_INVALID_ARGUMENT,
                                        "[NvTensorRTRTX EP] Unsupported graphics API for CIG context");
