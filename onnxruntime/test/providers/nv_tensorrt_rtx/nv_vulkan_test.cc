@@ -255,10 +255,16 @@ void init_vulkan_interop(VkResources& resources) {
   EXPECT_EQ(VK_SUCCESS, resources.loader.vkEnumeratePhysicalDevices(resources.instance, &count, physical_devices.data()));
 
   auto ep_devices = ort_env->GetEpDevices();
+#if !defined(_WIN32)
+  std::regex pci_bus_id_pattern("([a-fA-F0-9]+):([a-fA-F0-9]+):([a-fA-F0-9]+)\\.([a-fA-F0-9]+)");
+#endif
 
   for (auto& p : physical_devices) {
+    VkPhysicalDevicePCIBusInfoPropertiesEXT pci_props{};
+    pci_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
     VkPhysicalDeviceVulkan11Properties id_props{};
     id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+    id_props.pNext = &pci_props;
     VkPhysicalDeviceProperties2 props{};
     props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props.pNext = &id_props;
@@ -281,6 +287,20 @@ void init_vulkan_interop(VkResources& resources) {
             uint64_t vk = (uint64_t(vk_luid.HighPart) << 32) | uint64_t(vk_luid.LowPart);
             if (ep_luid != vk) {
               continue;
+            }
+          }
+#else
+          auto pci_bus_id = d.Device().Metadata().GetValue("pci_bus_id");
+          if (pci_bus_id) {
+            std::cmatch matches;
+            if (std::regex_match(pci_bus_id, matches, pci_bus_id_pattern)) {
+              auto domain = std::stoull(matches[1].str(), nullptr, 16);
+              auto bus = std::stoull(matches[2].str(), nullptr, 16);
+              auto device = std::stoull(matches[3].str(), nullptr, 16);
+              auto function = std::stoull(matches[4].str(), nullptr, 16);
+              if (domain != pci_props.pciDomain || bus != pci_props.pciBus || device != pci_props.pciDevice || function != pci_props.pciFunction) {
+                continue;
+              }
             }
           }
 #endif
